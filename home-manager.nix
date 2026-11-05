@@ -20,6 +20,7 @@ in
             "--ip ${pkgs.iproute2}/bin/ip"
           ]
           ++ lib.optional (cfg.configFile != null) "--config ${cfg.configFile}"
+          ++ lib.optional (cfg.name != null) "--name \"${cfg.name}\""
           ++ cfg.extraArgs
         );
         Restart = "on-failure";

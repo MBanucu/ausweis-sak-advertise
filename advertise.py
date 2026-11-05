@@ -5,17 +5,24 @@ Workaround for phones whose own discovery broadcast never reaches the PC
 (e.g. when the phone is a Wi-Fi hotspot or USB tethering).  It feeds a forged
 REMOTE_IFD discovery datagram to the local AusweisApp (UDP 127.0.0.1:24727).
 
+The mode is detected automatically each cycle by probing the phone's TLS
+server:
+
+* card-reader mode completes a mutual-TLS handshake with this PC's paired
+  certificate, so we advertise the real certificate fingerprint with
+  pairing=false;
+* pairing mode is TLS-PSK and rejects the handshake, so we advertise a fresh
+  IFDID with pairing=true.
+
 Discovery is attempted with two strategies:
 
 1. adb (preferred):  the phone's IP / listening port / model are read over
-   USB debugging.  This is fast and exact.
+   USB debugging.
 2. network (fallback when adb has no device):  the phone is assumed to be the
-   default gateway (true for hotspot/USB-tethering).  Its ephemeral TCP ports
-   are scanned and the AusweisApp TLS server is identified by comparing the
-   server certificate fingerprint against the fingerprint stored at pairing
-   time in the AusweisApp config.
+   default gateway (true for hotspot/USB-tethering) and its ephemeral TCP
+   ports are scanned.
 
-Use --no-adb to force the network strategy even when adb is connected.
+Use --pairing to force pairing mode, --no-adb to force the network strategy.
 """
 import argparse
 import concurrent.futures as cf
@@ -38,12 +45,12 @@ CONFIG = None
 EPHEMERAL = (32768, 60999)
 UDP_PORT = 24727
 USE_ADB = True
-PAIRING = False
 NAME = None
+FORCE_PAIRING = False
 
 _ctx = None
+_ctx_tried = False
 _net_cache = {"ip": None, "port": None}
-_pair_cache = {"ip": None, "port": None}
 
 
 def run(cmd):
@@ -57,33 +64,25 @@ def config_text():
     return open(CONFIG, encoding="utf-8").read()
 
 
-def paired_info():
-    """Return (name, fingerprint) of the most recently paired device."""
+def paired_entries():
     text = config_text()
+    if "trustedRemoteInfo=" not in text:
+        return []
     line = text.split("trustedRemoteInfo=", 1)[1].splitlines()[0]
     m = re.search(r"\[(.*)\]", line)
     if not m:
-        raise RuntimeError("No paired device in AusweisApp config")
-    entries = json.loads("[" + m.group(1).replace('\\"', '"') + "]")
-    if not entries:
-        raise RuntimeError("No paired device in AusweisApp config")
-    entry = entries[-1]
-    return entry.get("name", "smartphone"), entry["fingerprint"]
+        return []
+    try:
+        return json.loads("[" + m.group(1).replace('\\"', '"') + "]")
+    except Exception:
+        return []
 
 
-def fingerprint_for(model):
-    text = config_text()
-    line = text.split("trustedRemoteInfo=", 1)[1].splitlines()[0]
-    m = re.search(r"\[(.*)\]", line)
-    if not m:
-        raise RuntimeError("No paired device in AusweisApp config")
-    entries = json.loads("[" + m.group(1).replace('\\"', '"') + "]")
-    for entry in reversed(entries):
-        if entry.get("name") == model:
-            return entry["fingerprint"]
-    if entries:
-        return entries[-1]["fingerprint"]
-    raise RuntimeError("No paired device in AusweisApp config")
+def name_for_fingerprint(fp):
+    for entry in reversed(paired_entries()):
+        if entry.get("fingerprint") == fp:
+            return entry.get("name")
+    return None
 
 
 def extract_pem(value):
@@ -100,14 +99,19 @@ def extract_pem(value):
 
 
 def client_ctx():
-    """SSLContext loaded with this PC's own paired client certificate."""
-    global _ctx
-    if _ctx is not None:
+    """SSLContext with this PC's paired client certificate, or None."""
+    global _ctx, _ctx_tried
+    if _ctx_tried:
         return _ctx
+    _ctx_tried = True
     text = config_text()
     i = text.find("[remotereader]")
+    if i < 0:
+        return None
     cert = extract_pem(text[text.find("certificate=", i) + len("certificate="):text.find("key=", i)])
     key = extract_pem(text[text.find("key=", i) + len("key="):])
+    if "BEGIN CERTIFICATE" not in cert or "BEGIN" not in key:
+        return None
     tmpdir = tempfile.mkdtemp(prefix="ausweis-tls-")
     cert_path = os.path.join(tmpdir, "pc.crt")
     key_path = os.path.join(tmpdir, "pc.key")
@@ -189,28 +193,6 @@ def adb_device_info():
     return model, ip, port
 
 
-def discover_via_adb():
-    model, ip, port = adb_device_info()
-    return model, ip, port, fingerprint_for(model)
-
-
-def discover_for_pairing():
-    if USE_ADB:
-        try:
-            model, ip, port = adb_device_info()
-            return NAME or model, ip, port
-        except Exception:
-            pass
-    if _pair_cache["port"]:
-        return NAME or "smartphone", _pair_cache["ip"], _pair_cache["port"]
-    for ip in gateway_ips():
-        for port in scan_open_ports(ip):
-            _pair_cache["ip"] = ip
-            _pair_cache["port"] = port
-            return NAME or "smartphone", ip, port
-    raise RuntimeError("no smartphone reader found for pairing")
-
-
 # --- network strategy -----------------------------------------------------
 
 
@@ -244,29 +226,65 @@ def scan_open_ports(host):
     return open_ports
 
 
-def tls_matches(host, port, fp):
+def network_ip_port(refresh=False):
+    if not refresh and _net_cache["port"]:
+        return _net_cache["ip"], _net_cache["port"]
+    for ip in gateway_ips():
+        for port in scan_open_ports(ip):
+            _net_cache["ip"] = ip
+            _net_cache["port"] = port
+            return ip, port
+    raise RuntimeError("no smartphone reader found on any gateway")
+
+
+# --- mode detection -------------------------------------------------------
+
+
+def tls_probe(host, port):
+    """Probe the reader's TLS server.
+
+    Returns ("cert", fingerprint) in card-reader mode, ("psk", None) in pairing
+    mode (or untrusted), or (None, None) if the port is not reachable.
+    """
+    ctx = client_ctx()
+    if ctx is None:
+        return ("psk", None)
     try:
         sock = socket.create_connection((host, port), timeout=3)
-        with client_ctx().wrap_socket(sock, server_hostname="AusweisApp") as ss:
-            der = ss.getpeercert(binary_form=True)
-            return bool(der) and hashlib.sha256(der).hexdigest() == fp
     except Exception:
-        return False
+        return (None, None)
+    try:
+        with ctx.wrap_socket(sock, server_hostname="AusweisApp") as ss:
+            der = ss.getpeercert(binary_form=True)
+            if not der:
+                return ("psk", None)
+            return ("cert", hashlib.sha256(der).hexdigest())
+    except Exception:
+        return ("psk", None)
 
 
-def discover_via_network():
-    name, fp = paired_info()
-    for ip in gateway_ips():
-        if _net_cache["ip"] == ip and _net_cache["port"]:
-            if tls_matches(ip, _net_cache["port"], fp):
-                return name, ip, _net_cache["port"], fp
-            _net_cache["port"] = None
-        for port in scan_open_ports(ip):
-            if tls_matches(ip, port, fp):
-                _net_cache["ip"] = ip
-                _net_cache["port"] = port
-                return name, ip, port, fp
-    raise RuntimeError("AusweisApp reader not found on any gateway")
+# --- discovery ------------------------------------------------------------
+
+
+def discover():
+    name = NAME
+    ip = port = None
+    if USE_ADB:
+        try:
+            model, ip, port = adb_device_info()
+            name = NAME or model
+        except Exception:
+            ip = port = None
+    if ip is None or port is None:
+        ip, port = network_ip_port()
+        name = NAME or "smartphone"
+    kind, fp = tls_probe(ip, port)
+    if kind is None:
+        ip, port = network_ip_port(refresh=True)
+        kind, fp = tls_probe(ip, port)
+    if kind == "cert":
+        return (name_for_fingerprint(fp) or name), ip, port, fp, False
+    return name, ip, port, None, True
 
 
 # --- advertise ------------------------------------------------------------
@@ -288,7 +306,7 @@ def build_packet(model, ip, port, ifdid, pairing=False):
 
 
 def main():
-    global ADB, IP, CONFIG, EPHEMERAL, UDP_PORT, USE_ADB, PAIRING, NAME
+    global ADB, IP, CONFIG, EPHEMERAL, UDP_PORT, USE_ADB, NAME, FORCE_PAIRING
 
     parser = argparse.ArgumentParser(prog="ausweis-sak-advertise", description=__doc__.splitlines()[0])
     parser.add_argument("--config", metavar="PATH", default=None,
@@ -300,7 +318,7 @@ def main():
     parser.add_argument("--no-adb", action="store_true",
                         help="skip the adb strategy and always use the network strategy")
     parser.add_argument("--pairing", action="store_true",
-                        help="advertise in pairing mode (phone shows a pairing code)")
+                        help="force pairing mode (don't auto-detect)")
     parser.add_argument("--name", metavar="NAME", default=None,
                         help="device name to advertise (default: auto-detected)")
     parser.add_argument("--port-range", nargs=2, type=int, default=list(EPHEMERAL),
@@ -315,30 +333,26 @@ def main():
     EPHEMERAL = tuple(args.port_range)
     UDP_PORT = args.udp_port
     USE_ADB = not args.no_adb
-    PAIRING = args.pairing
     NAME = args.name
+    FORCE_PAIRING = args.pairing
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     pairing_ifdid = os.urandom(32).hex()
     sent = 0
     while True:
         try:
-            if PAIRING:
-                name, ip, port = discover_for_pairing()
-                ifdid, pairing = pairing_ifdid, True
-            elif USE_ADB:
-                try:
-                    name, ip, port, ifdid = discover_via_adb()
-                except Exception:
-                    name, ip, port, ifdid = discover_via_network()
-                pairing = False
+            name, ip, port, fp, wants_pairing = discover()
+            if FORCE_PAIRING:
+                wants_pairing = True
+                fp = None
+            if wants_pairing:
+                ifdid = pairing_ifdid
             else:
-                name, ip, port, ifdid = discover_via_network()
-                pairing = False
-            sock.sendto(build_packet(name, ip, port, ifdid, pairing=pairing), ("127.0.0.1", UDP_PORT))
+                ifdid = fp
+            sock.sendto(build_packet(name, ip, port, ifdid, pairing=wants_pairing), ("127.0.0.1", UDP_PORT))
             sent += 1
             if sent % 30 == 0:
-                print("advertising %s at wss://%s:%d (pairing=%s)" % (name, ip, port, pairing), flush=True)
+                print("advertising %s at wss://%s:%d (pairing=%s)" % (name, ip, port, wants_pairing), flush=True)
             time.sleep(1)
         except Exception as exc:
             print("waiting for smartphone: %s" % exc, flush=True)

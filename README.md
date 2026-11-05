@@ -22,11 +22,18 @@ datagram to the local AusweisApp. It discovers the phone in one of two ways:
 1. **adb** (preferred): reads the phone's IP, model, and AusweisApp TCP port over
    USB debugging.
 2. **network** (fallback when adb has no device): assumes the phone is the default
-   gateway (true for hotspot/tethering), port-scans its ephemeral range, and
-   identifies the AusweisApp TLS server by matching its certificate fingerprint
-   against the one stored at pairing time.
+   gateway (true for hotspot/tethering) and port-scans its ephemeral range.
 
-No root is required on the phone.
+It then auto-detects the phone's state by probing its TLS server and advertises
+accordingly:
+
+- **card-reader mode** (paired): advertises the real certificate fingerprint with
+  `pairing: false`;
+- **pairing mode**: advertises a fresh IFDID with `pairing: true`, so the phone
+  shows up in the PC's "Add pairing" list.
+
+So a single service covers both initial pairing and everyday use. No root is
+required on the phone.
 
 ## Prerequisites
 
@@ -105,22 +112,21 @@ nix run github:MBanucu/ausweis-sak-advertise -- --help
 | `services.ausweis-sak-advertise.enable` | bool | `false` | Enable the service. |
 | `...package` | package | `pkgs.callPackage ./package.nix {}` | The package to run. |
 | `...configFile` | null or path | `null` | Override the AusweisApp config path (defaults to `~/.config/AusweisApp/AusweisApp2.conf`). |
+| `...name` | null or str | `null` | Device name to advertise (default: auto-detected). |
 | `...extraArgs` | list of str | `[]` | Extra CLI args, e.g. `[ "--no-adb" ]`. |
 
 ## Pairing a device
 
-Pairing must happen before the service can keep a device discoverable. On a
-hotspot the phone's own broadcast doesn't reach the PC, so pair with the helper
-in pairing mode:
+Pairing must happen once before the reader can be used. The service already
+advertises in pairing mode automatically, so just start it (or leave the systemd
+service running) and:
 
-```sh
-nix run github:MBanucu/ausweis-sak-advertise -- --pairing --name "XPLORE 2"
-```
+1. On the phone, open **Card reader → Pair new device** (a 4-digit code is shown).
+2. On the PC, open **Settings → Smartphone as card reader** and press
+   **Pair device**.
+3. Enter the code shown on the phone. The code rotates every two minutes.
 
-Then, on the phone, open **Card reader → Pair new device** (a 4-digit code is
-shown), and on the PC open **Settings → Smartphone as card reader** and press
-**Pair device**. Enter the code shown on the phone. The code rotates every two
-minutes.
+If you need to force pairing mode, run with `--pairing`.
 
 ## CLI flags
 
@@ -129,7 +135,7 @@ minutes.
 --adb PATH         path to adb (default: adb in PATH)
 --ip PATH          path to ip (default: ip in PATH)
 --no-adb           always use the network strategy
---pairing          advertise in pairing mode (phone shows a pairing code)
+--pairing          force pairing mode (default: auto-detect)
 --name NAME        device name to advertise (default: auto-detected)
 --port-range LO HI ephemeral port range to scan (default: 32768 60999)
 --udp-port PORT    local UDP port (default: 24727)

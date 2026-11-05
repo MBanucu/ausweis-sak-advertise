@@ -19,6 +19,12 @@
       '';
     };
 
+    name = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "Device name to advertise (default: auto-detected).";
+    };
+
     extraArgs = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [ ];
