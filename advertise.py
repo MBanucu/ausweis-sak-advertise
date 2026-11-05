@@ -337,7 +337,9 @@ def main():
     FORCE_PAIRING = args.pairing
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    pairing_ifdid = os.urandom(32).hex()
+    # Stable placeholder IFDID for pairing mode: a random one would change on
+    # every restart, making AusweisApp show duplicate "add pairing" entries.
+    pairing_ifdid = "0" * 64
     sent = 0
     while True:
         try:
