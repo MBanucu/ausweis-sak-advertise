@@ -49,9 +49,7 @@ in
         RestartSec = "10";
       };
 
-      Install = {
-        WantedBy = [ "default.target" ];
-      };
+      wantedBy = [ "default.target" ];
     };
   };
 }
