@@ -107,6 +107,21 @@ nix run github:MBanucu/ausweis-sak-advertise -- --help
 | `...configFile` | null or path | `null` | Override the AusweisApp config path (defaults to `~/.config/AusweisApp/AusweisApp2.conf`). |
 | `...extraArgs` | list of str | `[]` | Extra CLI args, e.g. `[ "--no-adb" ]`. |
 
+## Pairing a device
+
+Pairing must happen before the service can keep a device discoverable. On a
+hotspot the phone's own broadcast doesn't reach the PC, so pair with the helper
+in pairing mode:
+
+```sh
+nix run github:MBanucu/ausweis-sak-advertise -- --pairing --name "XPLORE 2"
+```
+
+Then, on the phone, open **Card reader → Pair new device** (a 4-digit code is
+shown), and on the PC open **Settings → Smartphone as card reader** and press
+**Pair device**. Enter the code shown on the phone. The code rotates every two
+minutes.
+
 ## CLI flags
 
 ```
@@ -114,13 +129,15 @@ nix run github:MBanucu/ausweis-sak-advertise -- --help
 --adb PATH         path to adb (default: adb in PATH)
 --ip PATH          path to ip (default: ip in PATH)
 --no-adb           always use the network strategy
+--pairing          advertise in pairing mode (phone shows a pairing code)
+--name NAME        device name to advertise (default: auto-detected)
 --port-range LO HI ephemeral port range to scan (default: 32768 60999)
 --udp-port PORT    local UDP port (default: 24727)
 ```
 
 ## Limitations
 
-- The initial pairing is manual and must be done before the service can work.
+- Pairing is manual and must be done before the service can work.
 - The network fallback assumes the phone is the default gateway. If the phone and
   PC are both clients of a normal Wi-Fi network, AusweisApp's own broadcast works
   and this service is unnecessary.

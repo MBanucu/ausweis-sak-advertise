@@ -38,9 +38,12 @@ CONFIG = None
 EPHEMERAL = (32768, 60999)
 UDP_PORT = 24727
 USE_ADB = True
+PAIRING = False
+NAME = None
 
 _ctx = None
 _net_cache = {"ip": None, "port": None}
+_pair_cache = {"ip": None, "port": None}
 
 
 def run(cmd):
@@ -178,13 +181,34 @@ def pick_phone_ip(nets):
     raise RuntimeError("No phone IP on a network shared with this PC")
 
 
-def discover_via_adb():
+def adb_device_info():
     model = run([ADB, "shell", "getprop", "ro.product.model"]).strip()
     uid = app_uid()
     ip = pick_phone_ip(local_nets())
     port = listening_port(uid)
-    fp = fingerprint_for(model)
-    return model, ip, port, fp
+    return model, ip, port
+
+
+def discover_via_adb():
+    model, ip, port = adb_device_info()
+    return model, ip, port, fingerprint_for(model)
+
+
+def discover_for_pairing():
+    if USE_ADB:
+        try:
+            model, ip, port = adb_device_info()
+            return NAME or model, ip, port
+        except Exception:
+            pass
+    if _pair_cache["port"]:
+        return NAME or "smartphone", _pair_cache["ip"], _pair_cache["port"]
+    for ip in gateway_ips():
+        for port in scan_open_ports(ip):
+            _pair_cache["ip"] = ip
+            _pair_cache["port"] = port
+            return NAME or "smartphone", ip, port
+    raise RuntimeError("no smartphone reader found for pairing")
 
 
 # --- network strategy -----------------------------------------------------
@@ -248,23 +272,23 @@ def discover_via_network():
 # --- advertise ------------------------------------------------------------
 
 
-def build_packet(model, ip, port, fp):
+def build_packet(model, ip, port, ifdid, pairing=False):
     return json.dumps(
         {
             "msg": "REMOTE_IFD",
             "IFDName": model,
-            "IFDID": fp,
+            "IFDID": ifdid,
             "port": port,
             "SupportedAPI": ["IFDInterface_WebSocket_v2"],
             "addresses": ["wss://%s:%d" % (ip, port)],
-            "pairing": False,
+            "pairing": pairing,
         },
         separators=(",", ":"),
     ).encode()
 
 
 def main():
-    global ADB, IP, CONFIG, EPHEMERAL, UDP_PORT, USE_ADB
+    global ADB, IP, CONFIG, EPHEMERAL, UDP_PORT, USE_ADB, PAIRING, NAME
 
     parser = argparse.ArgumentParser(prog="ausweis-sak-advertise", description=__doc__.splitlines()[0])
     parser.add_argument("--config", metavar="PATH", default=None,
@@ -275,6 +299,10 @@ def main():
                         help="path to the ip binary (default: ip in PATH)")
     parser.add_argument("--no-adb", action="store_true",
                         help="skip the adb strategy and always use the network strategy")
+    parser.add_argument("--pairing", action="store_true",
+                        help="advertise in pairing mode (phone shows a pairing code)")
+    parser.add_argument("--name", metavar="NAME", default=None,
+                        help="device name to advertise (default: auto-detected)")
     parser.add_argument("--port-range", nargs=2, type=int, default=list(EPHEMERAL),
                         metavar=("LO", "HI"), help="ephemeral TCP port range to scan (default: %(default)s)")
     parser.add_argument("--udp-port", type=int, default=UDP_PORT,
@@ -287,22 +315,30 @@ def main():
     EPHEMERAL = tuple(args.port_range)
     UDP_PORT = args.udp_port
     USE_ADB = not args.no_adb
+    PAIRING = args.pairing
+    NAME = args.name
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    pairing_ifdid = os.urandom(32).hex()
     sent = 0
     while True:
         try:
-            if USE_ADB:
+            if PAIRING:
+                name, ip, port = discover_for_pairing()
+                ifdid, pairing = pairing_ifdid, True
+            elif USE_ADB:
                 try:
-                    model, ip, port, fp = discover_via_adb()
+                    name, ip, port, ifdid = discover_via_adb()
                 except Exception:
-                    model, ip, port, fp = discover_via_network()
+                    name, ip, port, ifdid = discover_via_network()
+                pairing = False
             else:
-                model, ip, port, fp = discover_via_network()
-            sock.sendto(build_packet(model, ip, port, fp), ("127.0.0.1", UDP_PORT))
+                name, ip, port, ifdid = discover_via_network()
+                pairing = False
+            sock.sendto(build_packet(name, ip, port, ifdid, pairing=pairing), ("127.0.0.1", UDP_PORT))
             sent += 1
             if sent % 30 == 0:
-                print("advertising %s at wss://%s:%d" % (model, ip, port), flush=True)
+                print("advertising %s at wss://%s:%d (pairing=%s)" % (name, ip, port, pairing), flush=True)
             time.sleep(1)
         except Exception as exc:
             print("waiting for smartphone: %s" % exc, flush=True)
