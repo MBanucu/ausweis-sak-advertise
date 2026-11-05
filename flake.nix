@@ -28,7 +28,7 @@
 
       nixosModules.default = ./module.nix;
 
-      homeManagerModules.default = ./module.nix;
+      homeManagerModules.default = ./home-manager.nix;
 
       devShells = forAllSystems (
         system:
