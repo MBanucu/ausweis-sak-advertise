@@ -63,17 +63,39 @@ def run(cmd):
 
 
 def process_running(name):
-    """True while a local process whose comm equals name exists."""
+    """True while a local process named name is running.
+
+    Wrappers hide the launcher name: NixOS runs AusweisApp as
+    .AusweisApp-wrapped while argv[0] still says AusweisApp, so compare comm,
+    argv[0] and the executable name, tolerating a wrapper's leading dot and
+    -suffix.
+    """
     wanted = name.lower()
+
+    def matches(candidate):
+        candidate = os.path.basename(candidate).lstrip(".").lower()
+        return candidate == wanted or candidate.startswith(wanted + "-")
+
     for pid in os.listdir("/proc"):
         if not pid.isdigit():
             continue
+        candidates = []
         try:
             with open("/proc/%s/comm" % pid, encoding="utf-8", errors="replace") as fh:
-                if fh.read().strip().lower() == wanted:
-                    return True
+                candidates.append(fh.read().strip())
         except OSError:
-            continue
+            pass
+        try:
+            with open("/proc/%s/cmdline" % pid, "rb") as fh:
+                candidates.append(fh.read().split(b"\0", 1)[0].decode("utf-8", "replace"))
+        except OSError:
+            pass
+        try:
+            candidates.append(os.readlink("/proc/%s/exe" % pid))
+        except OSError:
+            pass
+        if any(matches(c) for c in candidates):
+            return True
     return False
 
 
