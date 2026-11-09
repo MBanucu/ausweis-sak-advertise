@@ -25,6 +25,15 @@
       description = "Device name to advertise (default: auto-detected).";
     };
 
+    requireProcess = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = ''
+        Only advertise while a local process with this name is running
+        (e.g. "AusweisApp").  When null, advertise unconditionally.
+      '';
+    };
+
     extraArgs = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [ ];

@@ -22,6 +22,10 @@ Discovery is attempted with two strategies:
    default gateway (true for hotspot/USB-tethering) and its ephemeral TCP
    ports are scanned.
 
+With --require-process NAME nothing is probed or advertised until a local
+process with that name is running (e.g. AusweisApp), so the service stays
+idle while the PC-side application is closed.
+
 Use --pairing to force pairing mode, --no-adb to force the network strategy.
 """
 import argparse
@@ -47,6 +51,7 @@ UDP_PORT = 24727
 USE_ADB = True
 NAME = None
 FORCE_PAIRING = False
+REQUIRE_PROCESS = None
 
 _ctx = None
 _ctx_tried = False
@@ -55,6 +60,21 @@ _net_cache = {"ip": None, "port": None}
 
 def run(cmd):
     return subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL)
+
+
+def process_running(name):
+    """True while a local process whose comm equals name exists."""
+    wanted = name.lower()
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            with open("/proc/%s/comm" % pid, encoding="utf-8", errors="replace") as fh:
+                if fh.read().strip().lower() == wanted:
+                    return True
+        except OSError:
+            continue
+    return False
 
 
 # --- config helpers -------------------------------------------------------
@@ -306,7 +326,7 @@ def build_packet(model, ip, port, ifdid, pairing=False):
 
 
 def main():
-    global ADB, IP, CONFIG, EPHEMERAL, UDP_PORT, USE_ADB, NAME, FORCE_PAIRING
+    global ADB, IP, CONFIG, EPHEMERAL, UDP_PORT, USE_ADB, NAME, FORCE_PAIRING, REQUIRE_PROCESS
 
     parser = argparse.ArgumentParser(prog="ausweis-sak-advertise", description=__doc__.splitlines()[0])
     parser.add_argument("--config", metavar="PATH", default=None,
@@ -321,6 +341,8 @@ def main():
                         help="force pairing mode (don't auto-detect)")
     parser.add_argument("--name", metavar="NAME", default=None,
                         help="device name to advertise (default: auto-detected)")
+    parser.add_argument("--require-process", metavar="NAME", default=None,
+                        help="only advertise while a local process with this name is running (e.g. AusweisApp)")
     parser.add_argument("--port-range", nargs=2, type=int, default=list(EPHEMERAL),
                         metavar=("LO", "HI"), help="ephemeral TCP port range to scan (default: %(default)s)")
     parser.add_argument("--udp-port", type=int, default=UDP_PORT,
@@ -335,13 +357,24 @@ def main():
     USE_ADB = not args.no_adb
     NAME = args.name
     FORCE_PAIRING = args.pairing
+    REQUIRE_PROCESS = args.require_process
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     # Stable placeholder IFDID for pairing mode: a random one would change on
     # every restart, making AusweisApp show duplicate "add pairing" entries.
     pairing_ifdid = "0" * 64
     sent = 0
+    paused = False
     while True:
+        if REQUIRE_PROCESS and not process_running(REQUIRE_PROCESS):
+            if not paused:
+                print("paused: %s is not running" % REQUIRE_PROCESS, flush=True)
+                paused = True
+            time.sleep(5)
+            continue
+        if paused:
+            print("resuming: %s is running" % REQUIRE_PROCESS, flush=True)
+            paused = False
         try:
             name, ip, port, fp, wants_pairing = discover()
             if FORCE_PAIRING:

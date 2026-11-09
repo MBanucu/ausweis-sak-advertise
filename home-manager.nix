@@ -21,6 +21,7 @@ in
           ]
           ++ lib.optional (cfg.configFile != null) "--config ${cfg.configFile}"
           ++ lib.optional (cfg.name != null) "--name \"${cfg.name}\""
+          ++ lib.optional (cfg.requireProcess != null) "--require-process \"${cfg.requireProcess}\""
           ++ cfg.extraArgs
         );
         Restart = "on-failure";

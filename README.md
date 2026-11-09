@@ -73,6 +73,10 @@ Then, in `configuration.nix`:
 { services.ausweis-sak-advertise.enable = true; }
 ```
 
+On a PC where AusweisApp is only started when needed, set
+`requireProcess = "AusweisApp"` so the service idles (a 5-second check, no
+discovery traffic) while the app is closed.
+
 ### Home Manager
 
 ```nix
@@ -113,6 +117,7 @@ nix run github:MBanucu/ausweis-sak-advertise -- --help
 | `...package` | package | `pkgs.callPackage ./package.nix {}` | The package to run. |
 | `...configFile` | null or path | `null` | Override the AusweisApp config path (defaults to `~/.config/AusweisApp/AusweisApp2.conf`). |
 | `...name` | null or str | `null` | Device name to advertise (default: auto-detected). |
+| `...requireProcess` | null or str | `null` | Only advertise while a local process with this name is running (e.g. `"AusweisApp"`). |
 | `...extraArgs` | list of str | `[]` | Extra CLI args, e.g. `[ "--no-adb" ]`. |
 
 ## Pairing a device
@@ -137,6 +142,7 @@ If you need to force pairing mode, run with `--pairing`.
 --no-adb           always use the network strategy
 --pairing          force pairing mode (default: auto-detect)
 --name NAME        device name to advertise (default: auto-detected)
+--require-process NAME  only advertise while a local process with this name runs
 --port-range LO HI ephemeral port range to scan (default: 32768 60999)
 --udp-port PORT    local UDP port (default: 24727)
 ```
